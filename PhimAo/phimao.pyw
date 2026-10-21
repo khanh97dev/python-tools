@@ -177,11 +177,11 @@ class App:
         self.root.bind("<ButtonPress-3>", self.rmove_start)
         self.root.bind("<B3-Motion>", self.rmove)
         self.root.bind("<ButtonRelease-3>", self.rmove_end)
-        # nút kéo size ở góc dưới phải
-        self.grip = tk.Label(self.root, text="◢", fg="#e8eaed", bg="#5f6368",
-                             font=("Segoe UI", 6), cursor="size_nw_se", bd=0)
-        self.grip.place(relx=1, rely=1, anchor="se", width=10, height=10)
-        self.grip.bind("<ButtonPress-1>", lambda e: self.drag_start(e, "se"))
+        # nút kéo size ở góc dưới trái
+        self.grip = tk.Label(self.root, text="◣", fg="#e8eaed", bg="#5f6368",
+                             font=("Segoe UI", 6), cursor="size_ne_sw", bd=0)
+        self.grip.place(relx=0, rely=1, anchor="sw", width=10, height=10)
+        self.grip.bind("<ButtonPress-1>", lambda e: self.drag_start(e, "sw"))
         self.grip.bind("<B1-Motion>", self.drag_move)
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Chọn phím...", command=self.open_picker)
@@ -349,13 +349,7 @@ class App:
         self.buttons, self.sticky = [], {}
         cols = max(1, self.cfg["cols"])
         keys = self.cfg["keys"]
-        # ô đầu tiên: nút kéo di chuyển, to bằng 1 phím
-        mover = tk.Label(self.frame, text="✥", bg="#5f6368", fg="white",
-                         relief="raised", bd=1, cursor="fleur")
-        mover.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
-        mover.bind("<ButtonPress-1>", lambda e: self.drag_start(e, ""))
-        self.buttons.append(mover)
-        for i, name in enumerate(keys, start=1):
+        for i, name in enumerate(keys):
             b = tk.Label(self.frame, text=name, bg="#3c4043", fg="white",
                          relief="raised", bd=1, cursor="arrow")
             b.grid(row=i // cols, column=i % cols, sticky="nsew", padx=1, pady=1)
@@ -363,6 +357,12 @@ class App:
             b.bind("<ButtonRelease-1>", lambda e, b=b: self.release(b))
             self.buttons.append(b)
         rows = (len(keys) + 1 + cols - 1) // cols
+        # ô cuối (góc dưới phải): nút kéo di chuyển, to bằng 1 phím
+        mover = tk.Label(self.frame, text="✥", bg="#5f6368", fg="white",
+                         relief="raised", bd=1, cursor="fleur")
+        mover.grid(row=rows - 1, column=cols - 1, sticky="nsew", padx=1, pady=1)
+        mover.bind("<ButtonPress-1>", lambda e: self.drag_start(e, ""))
+        self.buttons.append(mover)
         for c in range(12):
             self.frame.columnconfigure(c, weight=1 if c < cols else 0, uniform="k" if c < cols else "")
         for r in range(max(rows, 1) + 12):
