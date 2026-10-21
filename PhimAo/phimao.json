@@ -7,6 +7,8 @@
     "`"
   ],
   "cols": 3,
-  "geometry": "146x84+1754+948",
-  "alpha": 0.95
+  "geometry": "192x55+1724+983",
+  "alpha": 0.8,
+  "titlebar": false,
+  "color": "#007b83"
 }
