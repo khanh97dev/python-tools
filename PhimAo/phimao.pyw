@@ -10,10 +10,12 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import messagebox, simpledialog
 from ctypes import wintypes
 
+import pystray
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -110,12 +112,16 @@ EXTRA = {
 ALL_ORDER = [k[0] for k in LAYOUT] + [k for v in EXTRA.values() for k in v]
 
 DEFAULT = {
-    "keys": ["Esc", "Tab", "Enter", "Backspace", "Ctrl+C", "Ctrl+V", "Ctrl+Z",
-             "←", "↑", "↓", "→", "Ctrl", "Shift", "Alt"],
-    "cols": 4,
-    "geometry": "420x220+900+500",
-    "alpha": 0.95,
+    "keys": ["Esc", "`", "PrtSc"],
+    "cols": 1,
+    "geometry": "37x93+6+1",
+    "alpha": 0.8,
+    "titlebar": False,
+    "color": "#007b83",
+    # tổ hợp bấm trên bàn phím thật -> phím gửi đi (chỉ bàn phím 1, tránh trùng giữa các bàn phím)
+    "hotkeys": {"Win+Ctrl+A": "Esc"} if PROFILE == "1" else {},
 }
+HOTKEY_MOD = {0x12: 0x1, 0x11: 0x2, 0x10: 0x4, 0x5B: 0x8}  # vk -> MOD_ALT/CONTROL/SHIFT/WIN
 
 
 def key_event(vk, up=False):
@@ -155,6 +161,8 @@ class App:
     def __init__(self):
         self.cfg = load_cfg()
         self.sticky = {}  # vk -> button
+        self.hidden = False
+        self.tray = None
         # AppID riêng -> mỗi bàn phím 1 icon taskbar, không bị gộp nhóm
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"PhimAo.{PROFILE}")
         self.root = tk.Tk()
@@ -185,6 +193,7 @@ class App:
         self.grip.bind("<B1-Motion>", self.drag_move)
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Chọn phím...", command=self.open_picker)
+        self.menu.add_command(label="Phím tắt...", command=self.open_hotkeys)
         cols = tk.Menu(self.menu, tearoff=0)
         for n in range(1, 13):
             cols.add_command(label=str(n), command=lambda n=n: self.set_cfg("cols", n))
@@ -207,7 +216,14 @@ class App:
         self.root.bind("<Configure>", self.on_resize)
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
         self.build()
+        # kéo về lại nếu vị trí đã lưu đang nằm ngoài màn hình
+        self.root.update_idletasks()
+        self.move_to(self.root.winfo_x(), self.root.winfo_y())
         self.root.after(100, self.no_activate)
+        self.root.after(500, self.keep_visible)
+        self.start_tray()
+        self.hk_thread = None
+        self.start_hotkeys()
 
     # Không cho cửa sổ nhận focus -> phím gửi vào app đang gõ; vẫn hiện trên taskbar
     def no_activate(self):
@@ -237,6 +253,28 @@ class App:
         d.text((size / 2, size / 2), text, fill="white", font=font, anchor="mm")
         self._icon = ImageTk.PhotoImage(img)
         self.root.iconphoto(True, self._icon)
+        self._icon_img = img
+        if self.tray:
+            self.tray.icon = img
+
+    # icon ở khay hệ thống (cạnh đồng hồ): click = hiện/ẩn, chuột phải = menu
+    def start_tray(self):
+        def ui(fn):  # pystray chạy thread riêng -> chuyển về thread tkinter
+            return lambda icon, item: self.root.after(0, fn)
+        menu = pystray.Menu(
+            pystray.MenuItem("Hiện/ẩn bàn phím", ui(self.toggle_hidden), default=True),
+            pystray.MenuItem("Chọn phím...", ui(self.open_picker)),
+            pystray.MenuItem("Phím tắt...", ui(self.open_hotkeys)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Thoát", ui(self.quit)),
+        )
+        self.tray = pystray.Icon(f"PhimAo_{PROFILE}", self._icon_img, f"Phím ảo {PROFILE}", menu)
+        threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def toggle_hidden(self):
+        self.hidden = not self.hidden
+        hwnd = user32.GetParent(self.root.winfo_id())
+        user32.ShowWindow(hwnd, 0 if self.hidden else 4)  # SW_HIDE / SW_SHOWNOACTIVATE
 
     def set_color(self, c):
         self.cfg["color"] = c
@@ -252,6 +290,7 @@ class App:
         if not name or name in all_profiles():
             return
         cfg = dict(self.cfg)
+        cfg["hotkeys"] = {}  # phím tắt đã thuộc bàn phím hiện tại, tránh trùng
         x, y = self.root.winfo_x(), self.root.winfo_y()
         cfg["geometry"] = f"{self.root.winfo_width()}x{self.root.winfo_height()}+{x}+{max(0, y - self.root.winfo_height() - 10)}"
         cfg["color"] = COLORS[len(all_profiles()) % len(COLORS)]
@@ -260,11 +299,22 @@ class App:
         launch(name)
 
     def delete_profile(self):
+        if self.tray:
+            self.tray.stop()
         self.root.destroy()
         try:
             os.remove(CONFIG)
         except OSError:
             pass
+
+    # Giữ cửa sổ nằm trọn trong màn hình (tính cả nhiều màn hình)
+    def move_to(self, x, y):
+        sx, sy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)  # SM_X/YVIRTUALSCREEN
+        sw, sh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)  # SM_CX/CYVIRTUALSCREEN
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        x = max(sx, min(x, sx + sw - w))
+        y = max(sy, min(y, sy + sh - h))
+        self.root.geometry(f"+{x}+{y}")
 
     def rmove_start(self, e):
         self.rdrag = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y(), False)
@@ -276,7 +326,7 @@ class App:
         dx, dy = e.x_root - x0, e.y_root - y0
         if moved or abs(dx) + abs(dy) > 4:
             self.rdrag = (x0, y0, x, y, True)
-            self.root.geometry(f"+{x + dx}+{y + dy}")
+            self.move_to(x + dx, y + dy)
 
     def rmove_end(self, e):
         moved = getattr(self, "rdrag", None) and self.rdrag[4]
@@ -323,7 +373,7 @@ class App:
         edges, x0, y0, x, y, w, h = self.drag
         dx, dy = e.x_root - x0, e.y_root - y0
         if not edges:
-            self.root.geometry(f"+{x + dx}+{y + dy}")
+            self.move_to(x + dx, y + dy)
             return
         if "e" in edges:
             w = max(30, w + dx)
@@ -432,6 +482,8 @@ class App:
 
     def quit(self):
         self.save()
+        if self.tray:
+            self.tray.stop()
         self.root.destroy()
 
     def open_picker(self):
@@ -510,6 +562,107 @@ class App:
         tk.Button(bottom, text="Áp dụng", width=12, command=apply).pack(side="right")
         tk.Button(bottom, text="Hủy", width=12, command=top.destroy).pack(side="right", padx=6)
         tk.Button(bottom, text="Bỏ chọn hết", width=12, command=clear).pack(side="left")
+
+    # Win+D / Show desktop làm bảng phím bị thu nhỏ -> tự hiện lại và đưa lên trên cùng
+    def keep_visible(self):
+        hwnd = user32.GetParent(self.root.winfo_id())
+        if self.hidden:
+            self.root.after(500, self.keep_visible)
+            return
+        if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
+            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+        # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+        user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        self.root.after(500, self.keep_visible)
+
+    # Phím tắt toàn cục (RegisterHotKey) chạy ở thread riêng có vòng lặp message
+    def start_hotkeys(self):
+        if self.hk_thread:  # dừng thread cũ -> gỡ đăng ký
+            user32.PostThreadMessageW(self.hk_thread, 0x0012, 0, 0)  # WM_QUIT
+            self.hk_thread = None
+        hotkeys = [(k, v) for k, v in self.cfg.get("hotkeys", {}).items()
+                   if parse_combo(k) and parse_combo(k)[1] and parse_combo(v)]
+        if not hotkeys:
+            return
+        self.hk_failed = []
+
+        def loop():
+            self.hk_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+            for i, (k, _) in enumerate(hotkeys):
+                mods, main = parse_combo(k)
+                flags = 0x4000  # MOD_NOREPEAT
+                for m in mods:
+                    flags |= HOTKEY_MOD[m]
+                if not user32.RegisterHotKey(None, i + 1, flags, main):
+                    self.hk_failed.append(k)
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == 0x0312:  # WM_HOTKEY
+                    self.fire_hotkey(*hotkeys[msg.wParam - 1])
+            for i in range(len(hotkeys)):
+                user32.UnregisterHotKey(None, i + 1)
+
+        threading.Thread(target=loop, daemon=True).start()
+        self.root.after(500, self.report_hotkeys)
+
+    def report_hotkeys(self):
+        if self.hk_failed:
+            messagebox.showwarning("Phím tắt", "Không đăng ký được (app khác đang dùng):\n"
+                                   + "\n".join(self.hk_failed), parent=self.root)
+            self.hk_failed = []
+
+    def fire_hotkey(self, combo, target):
+        held, _ = parse_combo(combo)
+        # nhả các phím Ctrl/Alt... đang giữ để phím gửi đi không bị dính tổ hợp;
+        # phím giả 0xE8 chen vào trước để nhả Alt không mở menu của app
+        key_event(0xE8)
+        key_event(0xE8, up=True)
+        for m in held:
+            key_event(m, up=True)
+        mods, main = parse_combo(target)
+        for m in mods:
+            key_event(m)
+        if main is not None:
+            key_event(main)
+            key_event(main, up=True)
+        for m in reversed(mods):
+            key_event(m, up=True)
+
+    def open_hotkeys(self):
+        top = tk.Toplevel(self.root)
+        top.title("Phím tắt")
+        top.attributes("-topmost", True)
+        top.configure(bg="#202124")
+        tk.Label(top, text="Mỗi dòng: tổ hợp bấm = phím gửi đi (vd: Ctrl+Alt+A = Esc)",
+                 fg="#bdc1c6", bg="#202124").pack(anchor="w", padx=8, pady=(8, 2))
+        text = tk.Text(top, width=40, height=8)
+        text.insert("1.0", "\n".join(f"{k} = {v}" for k, v in self.cfg.get("hotkeys", {}).items()))
+        text.pack(fill="both", expand=True, padx=8)
+        err = tk.Label(top, fg="#f28b82", bg="#202124")
+        err.pack(anchor="w", padx=8)
+
+        def apply():
+            hotkeys, bad = {}, []
+            for line in text.get("1.0", "end").splitlines():
+                if not line.strip():
+                    continue
+                k, _, v = line.partition("=")
+                k, v = k.strip(), v.strip()
+                pk = parse_combo(k)
+                if not pk or pk[1] is None or not pk[0] or not parse_combo(v):
+                    bad.append(line.strip())
+                else:
+                    hotkeys[k] = v
+            if bad:
+                err.configure(text="Không hiểu (tổ hợp phải có Ctrl/Alt/Shift/Win + 1 phím): "
+                              + ", ".join(bad))
+                return
+            self.cfg["hotkeys"] = hotkeys
+            self.save()
+            self.start_hotkeys()
+            top.destroy()
+
+        tk.Button(top, text="Lưu", command=apply, width=10).pack(pady=8)
 
     def run(self):
         self.root.mainloop()

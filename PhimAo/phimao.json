@@ -1,13 +1,11 @@
 {
   "keys": [
     "Esc",
-    "Ctrl+C",
-    "Ctrl+V",
-    "Ctrl+Z",
-    "`"
+    "`",
+    "PrtSc"
   ],
-  "cols": 2,
-  "geometry": "146x48+1765+991",
+  "cols": 1,
+  "geometry": "37x93+6+1",
   "alpha": 0.8,
   "titlebar": false,
   "color": "#007b83"
